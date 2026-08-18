@@ -82,13 +82,24 @@ export default function NewTranslation() {
   const startRecording = async () => {
     try {
       setErrorMessage(null);
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+        },
+      });
       audioChunksRef.current = [];
       setRecordingSeconds(0);
 
-      const mediaRecorder = new MediaRecorder(stream, {
-        mimeType: "audio/webm",
-      });
+      let options = {};
+      if (MediaRecorder.isTypeSupported("audio/webm;codecs=opus")) {
+        options = { mimeType: "audio/webm;codecs=opus" };
+      } else if (MediaRecorder.isTypeSupported("audio/ogg;codecs=opus")) {
+        options = { mimeType: "audio/ogg;codecs=opus" };
+      }
+
+      const mediaRecorder = new MediaRecorder(stream, options);
 
       mediaRecorder.ondataavailable = (event) => {
         if (event.data.size > 0) {
@@ -97,9 +108,11 @@ export default function NewTranslation() {
       };
 
       mediaRecorder.onstop = () => {
-        const audioBlob = new Blob(audioChunksRef.current, { type: "audio/webm" });
-        const file = new File([audioBlob], `recording-${Date.now()}.webm`, {
-          type: "audio/webm",
+        const mimeType = mediaRecorder.mimeType || "audio/webm";
+        const audioBlob = new Blob(audioChunksRef.current, { type: mimeType });
+        const fileExt = mimeType.includes("ogg") ? "ogg" : "webm";
+        const file = new File([audioBlob], `recording-${Date.now()}.${fileExt}`, {
+          type: mimeType,
         });
 
         // Set file and local URL for preview
