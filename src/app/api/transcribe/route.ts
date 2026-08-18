@@ -17,6 +17,7 @@ export async function POST(req: NextRequest) {
       file: audio,
       model: "whisper-large-v3-turbo",
       language: "ta",
+      prompt: "தமிழ் transcription. Please output in Tamil Unicode script only. (e.g. நாளைக்கு காலை பத்து மணிக்கு எனக்கு மீட்டிங் இருக்கு)",
       response_format: "json",
     });
 
