@@ -27,7 +27,9 @@ export async function POST(req: NextRequest) {
       temperature: 0.3,
     });
 
+    console.log("Groq translation response choices:", JSON.stringify(response.choices));
     const englishText = response.choices[0]?.message?.content?.trim() || "";
+    console.log("Extracted englishText:", englishText);
 
     return NextResponse.json({ englishText });
   } catch (error) {

@@ -10,9 +10,31 @@ export async function POST(req: NextRequest) {
     const durationStr = formData.get("duration") as string | null;
     const filename = formData.get("filename") as string | null;
 
-    if (!audio || !tamilText || !englishText) {
+    console.log("Translations POST request fields:", {
+      hasAudio: !!audio,
+      audioName: audio instanceof File ? audio.name : null,
+      audioSize: audio instanceof File ? audio.size : null,
+      tamilText,
+      englishText,
+    });
+
+    if (!audio || !(audio instanceof File)) {
       return NextResponse.json(
-        { error: "Audio file, Tamil text, and English translation are required" },
+        { error: "A valid audio file is required" },
+        { status: 400 }
+      );
+    }
+
+    if (tamilText === null || tamilText === undefined || tamilText.trim() === "") {
+      return NextResponse.json(
+        { error: "Tamil transcription text is required and cannot be empty" },
+        { status: 400 }
+      );
+    }
+
+    if (englishText === null || englishText === undefined || englishText.trim() === "") {
+      return NextResponse.json(
+        { error: "English translation text is required and cannot be empty" },
         { status: 400 }
       );
     }
