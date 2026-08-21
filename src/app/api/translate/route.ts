@@ -12,6 +12,7 @@ export async function POST(req: NextRequest) {
       );
     }
 
+    
     const englishText = await translateTamilLongText(tamilText);
 
     return NextResponse.json({ englishText });
