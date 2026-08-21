@@ -1,13 +1,9 @@
 "use client";
 
-import { useState, useRef, useEffect } from "react";
+import { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import {
   Upload,
-  Mic,
-  Square,
-  Play,
-  Pause,
   Copy,
   Check,
   Edit2,
@@ -23,18 +19,11 @@ type PipelineStep = "idle" | "uploading" | "transcribing" | "translating" | "sav
 
 export default function NewTranslation() {
   const router = useRouter();
-  
+
   // Audio states
   const [audioFile, setAudioFile] = useState<File | null>(null);
   const [audioUrl, setAudioUrl] = useState<string | null>(null);
   const [audioDuration, setAudioDuration] = useState<number>(0);
-  
-  // Recording states
-  const [isRecording, setIsRecording] = useState(false);
-  const [recordingSeconds, setRecordingSeconds] = useState(0);
-  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
-  const audioChunksRef = useRef<Blob[]>([]);
-  const timerRef = useRef<NodeJS.Timeout | null>(null);
 
   // Pipeline execution states
   const [pipelineStep, setPipelineStep] = useState<PipelineStep>("idle");
@@ -51,95 +40,13 @@ export default function NewTranslation() {
   useEffect(() => {
     return () => {
       if (audioUrl) URL.revokeObjectURL(audioUrl);
-      if (timerRef.current) clearInterval(timerRef.current);
     };
   }, [audioUrl]);
 
-  // Handle Recording Timer
-  useEffect(() => {
-    if (isRecording) {
-      timerRef.current = setInterval(() => {
-        setRecordingSeconds((prev) => prev + 1);
-      }, 1000);
-    } else {
-      if (timerRef.current) {
-        clearInterval(timerRef.current);
-        timerRef.current = null;
-      }
-    }
-    return () => {
-      if (timerRef.current) clearInterval(timerRef.current);
-    };
-  }, [isRecording]);
-
   const formatTime = (seconds: number) => {
     const mins = Math.floor(seconds / 60);
-    const secs = seconds % 60;
+    const secs = Math.round(seconds % 60);
     return `${mins}:${secs.toString().padStart(2, "0")}`;
-  };
-
-  // Start Mic Recording
-  const startRecording = async () => {
-    try {
-      setErrorMessage(null);
-      const stream = await navigator.mediaDevices.getUserMedia({
-        audio: {
-          echoCancellation: true,
-          noiseSuppression: true,
-          autoGainControl: true,
-        },
-      });
-      audioChunksRef.current = [];
-      setRecordingSeconds(0);
-
-      let options = {};
-      if (MediaRecorder.isTypeSupported("audio/webm;codecs=opus")) {
-        options = { mimeType: "audio/webm;codecs=opus" };
-      } else if (MediaRecorder.isTypeSupported("audio/ogg;codecs=opus")) {
-        options = { mimeType: "audio/ogg;codecs=opus" };
-      }
-
-      const mediaRecorder = new MediaRecorder(stream, options);
-
-      mediaRecorder.ondataavailable = (event) => {
-        if (event.data.size > 0) {
-          audioChunksRef.current.push(event.data);
-        }
-      };
-
-      mediaRecorder.onstop = () => {
-        const mimeType = mediaRecorder.mimeType || "audio/webm";
-        const audioBlob = new Blob(audioChunksRef.current, { type: mimeType });
-        const fileExt = mimeType.includes("ogg") ? "ogg" : "webm";
-        const file = new File([audioBlob], `recording-${Date.now()}.${fileExt}`, {
-          type: mimeType,
-        });
-
-        // Set file and local URL for preview
-        setAudioFile(file);
-        const url = URL.createObjectURL(audioBlob);
-        setAudioUrl(url);
-        setAudioDuration(recordingSeconds);
-
-        // Stop all tracks on the stream to release mic
-        stream.getTracks().forEach((track) => track.stop());
-      };
-
-      mediaRecorderRef.current = mediaRecorder;
-      mediaRecorder.start();
-      setIsRecording(true);
-    } catch (err: any) {
-      console.error("Microphone access error:", err);
-      setErrorMessage("Microphone permission denied or unsupported by browser.");
-    }
-  };
-
-  // Stop Mic Recording
-  const stopRecording = () => {
-    if (mediaRecorderRef.current && isRecording) {
-      mediaRecorderRef.current.stop();
-      setIsRecording(false);
-    }
   };
 
   // Handle File Upload Select
@@ -149,7 +56,7 @@ export default function NewTranslation() {
 
     setErrorMessage(null);
 
-    // Validate size (max 25MB for Groq Whisper API)
+    // Validate size (max 25MB for audio processing API)
     if (file.size > 25 * 1024 * 1024) {
       setErrorMessage("File exceeds the 25MB size limit.");
       return;
@@ -184,20 +91,58 @@ export default function NewTranslation() {
     try {
       // Step 1: Transcribing
       setPipelineStep("transcribing");
-      const tamilTranscript = await mozhiService.transcribeAudio(audioFile);
-      setTamilText(tamilTranscript);
+      const transcribeResult = await mozhiService.transcribeAudio(audioFile);
 
-      // Step 2: Translating
-      setPipelineStep("translating");
-      const englishTranslation = await mozhiService.translateText(tamilTranscript);
-      setEnglishText(englishTranslation);
+      let finalTamilText = "";
+      let finalEnglishText = "";
+
+      if (transcribeResult.isAsync && transcribeResult.jobId && transcribeResult.filename) {
+        console.log("Async job started:", transcribeResult.jobId);
+
+        // Start polling status
+        let isDone = false;
+        let attempts = 0;
+        const maxAttempts = 60; // 60 * 3s = 180s (3 minutes max)
+
+        while (!isDone && attempts < maxAttempts) {
+          attempts++;
+          await new Promise((resolve) => setTimeout(resolve, 3000));
+
+          const statusResult = await mozhiService.checkBatchStatus(
+            transcribeResult.jobId,
+            transcribeResult.filename
+          );
+
+          if (statusResult.status === "completed") {
+            finalTamilText = statusResult.transcription || "";
+            finalEnglishText = statusResult.translation || "";
+            isDone = true;
+          } else if (statusResult.status === "failed") {
+            throw new Error(statusResult.error || "Sarvam asynchronous speech processing failed.");
+          }
+        }
+
+        if (!isDone) {
+          throw new Error("Speech transcription timed out. The file was too long or processing failed.");
+        }
+      } else {
+        // Sync STT succeeded
+        finalTamilText = transcribeResult.tamilText || "";
+
+        // Step 2: Translating
+        setPipelineStep("translating");
+        finalEnglishText = await mozhiService.translateText(finalTamilText);
+      }
+
+      setTamilText(finalTamilText);
+      setEnglishText(finalEnglishText);
 
       // Step 3: Saving to Supabase (Audio Storage + Postgres Table)
       setPipelineStep("saving");
       await mozhiService.saveTranslation(
         audioFile,
-        tamilTranscript,
-        englishTranslation,
+        finalTamilText,
+        finalEnglishText,
         audioDuration,
         audioFile.name
       );
@@ -241,71 +186,35 @@ export default function NewTranslation() {
           Create Tamil-to-English Translation
         </h2>
         <p className="text-sm text-zinc-500 dark:text-zinc-400">
-          Upload Tamil audio or record speech to transcribe and translate in real-time.
+          Upload Tamil audio to transcribe and translate in real-time.
         </p>
       </div>
 
       {pipelineStep === "idle" || pipelineStep === "error" ? (
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-          {/* Record Column */}
-          <div className="flex flex-col items-center justify-center p-8 bg-white border border-zinc-200 rounded-2xl dark:bg-zinc-950 dark:border-zinc-800">
-            <div className="flex items-center justify-center w-16 h-16 rounded-full bg-zinc-50 dark:bg-zinc-900 mb-6">
-              <Mic className="w-8 h-8 text-zinc-600 dark:text-zinc-400" />
-            </div>
-            <h3 className="text-lg font-semibold text-zinc-900 dark:text-white mb-2">Record Audio</h3>
-            <p className="text-sm text-zinc-500 dark:text-zinc-400 text-center mb-6 max-w-xs">
-              Record Tamil speech directly using your browser microphone.
-            </p>
-
-            {isRecording ? (
-              <div className="flex flex-col items-center gap-4">
-                <div className="flex items-center gap-3 px-4 py-2 bg-red-50 text-red-700 border border-red-200 rounded-full animate-pulse dark:bg-red-950/30 dark:text-red-400 dark:border-red-900">
-                  <span className="w-2.5 h-2.5 rounded-full bg-red-600 dark:bg-red-500 animate-ping" />
-                  <span className="font-semibold">{formatTime(recordingSeconds)}</span>
-                </div>
-                <button
-                  onClick={stopRecording}
-                  className="flex items-center justify-center gap-2 px-6 py-3 bg-red-600 text-white font-semibold rounded-xl hover:bg-red-700 active:scale-95 transition-all shadow-md"
-                >
-                  <Square className="w-5 h-5 fill-white" /> Stop Recording
-                </button>
-              </div>
-            ) : (
-              <button
-                onClick={startRecording}
-                className="flex items-center justify-center gap-2 px-6 py-3 bg-zinc-900 text-white font-semibold rounded-xl hover:bg-zinc-800 dark:bg-white dark:text-black dark:hover:bg-zinc-100 active:scale-95 transition-all shadow-md"
-              >
-                <Mic className="w-5 h-5" /> Start Recording
-              </button>
-            )}
+        <div className="flex flex-col items-center justify-center p-12 bg-white border border-zinc-200 rounded-3xl dark:bg-zinc-950 dark:border-zinc-800 shadow-sm max-w-xl mx-auto">
+          <div className="flex items-center justify-center w-16 h-16 rounded-full bg-zinc-50 dark:bg-zinc-900 mb-6">
+            <Upload className="w-8 h-8 text-zinc-600 dark:text-zinc-400" />
           </div>
+          <h3 className="text-xl font-bold text-zinc-900 dark:text-white mb-2">Upload Audio File</h3>
+          <p className="text-sm text-zinc-500 dark:text-zinc-400 text-center mb-8 max-w-sm">
+            Select a Tamil audio file from your device to transcribe and translate. Supports MP3, WAV, M4A, or WEBM (Max 25MB).
+          </p>
 
-          {/* Upload Column */}
-          <div className="flex flex-col items-center justify-center p-8 bg-white border border-zinc-200 rounded-2xl dark:bg-zinc-950 dark:border-zinc-800">
-            <div className="flex items-center justify-center w-16 h-16 rounded-full bg-zinc-50 dark:bg-zinc-900 mb-6">
-              <Upload className="w-8 h-8 text-zinc-600 dark:text-zinc-400" />
-            </div>
-            <h3 className="text-lg font-semibold text-zinc-900 dark:text-white mb-2">Upload Audio</h3>
-            <p className="text-sm text-zinc-500 dark:text-zinc-400 text-center mb-6 max-w-xs">
-              Supports MP3, WAV, M4A, or WEBM. Max size 25MB.
-            </p>
-
-            <label className="flex items-center justify-center gap-2 px-6 py-3 border border-zinc-300 dark:border-zinc-700 hover:bg-zinc-50 dark:hover:bg-zinc-900 rounded-xl cursor-pointer font-semibold text-zinc-700 dark:text-zinc-300 transition-colors shadow-sm">
-              <Upload className="w-5 h-5" /> Select File
-              <input
-                type="file"
-                accept="audio/*"
-                onChange={handleFileChange}
-                className="hidden"
-              />
-            </label>
-          </div>
+          <label className="flex items-center justify-center gap-2.5 px-6 py-3.5 bg-zinc-900 hover:bg-zinc-800 text-white dark:bg-white dark:text-black dark:hover:bg-zinc-100 rounded-xl cursor-pointer font-semibold transition-all shadow-md active:scale-95">
+            <Upload className="w-5 h-5" /> Select Audio File
+            <input
+              type="file"
+              accept="audio/*"
+              onChange={handleFileChange}
+              className="hidden"
+            />
+          </label>
         </div>
       ) : null}
 
       {/* Selected Audio Preview and Action Trigger */}
       {audioFile && (pipelineStep === "idle" || pipelineStep === "error") && (
-        <div className="p-6 bg-white border border-zinc-200 rounded-2xl dark:bg-zinc-950 dark:border-zinc-800 space-y-4">
+        <div className="p-6 bg-white border border-zinc-200 rounded-2xl dark:bg-zinc-950 dark:border-zinc-800 space-y-4 max-w-2xl mx-auto">
           <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
             <div>
               <p className="text-sm font-semibold text-zinc-900 dark:text-white">Selected Audio</p>
@@ -330,7 +239,7 @@ export default function NewTranslation() {
           </div>
           {audioUrl && (
             <div className="w-full flex items-center justify-center p-3 bg-zinc-50 dark:bg-zinc-900/50 rounded-xl border border-zinc-100 dark:border-zinc-800/80">
-              <audio src={audioUrl} controls className="w-full max-w-xl h-10" />
+              <audio src={audioUrl} controls className="w-full h-10" />
             </div>
           )}
         </div>
@@ -338,7 +247,7 @@ export default function NewTranslation() {
 
       {/* Pipeline Loader View */}
       {pipelineStep !== "idle" && pipelineStep !== "error" && pipelineStep !== "completed" && (
-        <div className="p-8 bg-white border border-zinc-200 rounded-2xl dark:bg-zinc-950 dark:border-zinc-800 space-y-6">
+        <div className="p-8 bg-white border border-zinc-200 rounded-2xl dark:bg-zinc-950 dark:border-zinc-800 space-y-6 max-w-2xl mx-auto shadow-sm">
           <div className="flex flex-col items-center justify-center py-6">
             <Loader2 className="w-10 h-10 text-zinc-900 dark:text-white animate-spin mb-4" />
             <h3 className="text-lg font-semibold text-zinc-900 dark:text-white">Processing translation...</h3>
@@ -385,7 +294,7 @@ export default function NewTranslation() {
                 <span className="text-zinc-900 dark:text-white animate-pulse flex items-center gap-1">
                   Saving... <Loader2 className="w-3.5 h-3.5 animate-spin" />
                 </span>
-              ) : pipelineStep === "completed" ? (
+              ) : (pipelineStep as string) === "completed" ? (
                 <span className="text-emerald-600 dark:text-emerald-400 font-semibold">✓</span>
               ) : (
                 <span className="text-zinc-400">Waiting...</span>
@@ -397,7 +306,7 @@ export default function NewTranslation() {
 
       {/* Error message card */}
       {errorMessage && (
-        <div className="p-4 bg-red-50 text-red-700 border border-red-200 rounded-xl dark:bg-red-950/30 dark:text-red-400 dark:border-red-900/50">
+        <div className="p-4 bg-red-50 text-red-700 border border-red-200 rounded-xl dark:bg-red-950/30 dark:text-red-400 dark:border-red-900/50 max-w-2xl mx-auto shadow-sm">
           <p className="text-sm font-semibold">Processing Error</p>
           <p className="text-xs mt-1">{errorMessage}</p>
         </div>
@@ -406,7 +315,7 @@ export default function NewTranslation() {
       {/* Side-by-Side Results Card */}
       {pipelineStep === "completed" && (
         <div className="space-y-6">
-          <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 p-4 bg-emerald-50 text-emerald-800 border border-emerald-200 rounded-2xl dark:bg-emerald-950/30 dark:text-emerald-400 dark:border-emerald-900">
+          <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 p-4 bg-emerald-50 text-emerald-800 border border-emerald-200 rounded-2xl dark:bg-emerald-950/30 dark:text-emerald-400 dark:border-emerald-900 shadow-sm">
             <div className="flex items-center gap-2">
               <Sparkles className="w-5 h-5 text-emerald-600 dark:text-emerald-400" />
               <div>
@@ -417,13 +326,13 @@ export default function NewTranslation() {
             <div className="flex items-center gap-2">
               <button
                 onClick={resetForm}
-                className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold rounded-lg transition-colors"
+                className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold rounded-lg transition-colors shadow-sm"
               >
                 Translate New Audio
               </button>
               <button
                 onClick={() => router.push("/history")}
-                className="px-4 py-2 border border-emerald-300 dark:border-emerald-800 hover:bg-emerald-100 dark:hover:bg-emerald-900/50 text-xs font-semibold rounded-lg transition-colors"
+                className="px-4 py-2 border border-emerald-300 dark:border-emerald-800 hover:bg-emerald-100 dark:hover:bg-emerald-900/50 text-xs font-semibold rounded-lg transition-colors shadow-sm"
               >
                 View History
               </button>
@@ -431,7 +340,7 @@ export default function NewTranslation() {
           </div>
 
           {audioUrl && (
-            <div className="p-4 bg-zinc-50 border border-zinc-200 rounded-xl dark:bg-zinc-900/50 dark:border-zinc-800 flex items-center justify-between gap-4">
+            <div className="p-4 bg-white border border-zinc-200 rounded-xl dark:bg-zinc-950 dark:border-zinc-805 flex items-center justify-between gap-4 shadow-sm">
               <div className="flex items-center gap-2 text-zinc-700 dark:text-zinc-300">
                 <Volume2 className="w-5 h-5" />
                 <span className="text-sm font-semibold">Original Audio Playback</span>
@@ -442,7 +351,7 @@ export default function NewTranslation() {
 
           <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
             {/* Tamil Transcript */}
-            <div className="flex flex-col bg-white border border-zinc-200 rounded-2xl dark:bg-zinc-950 dark:border-zinc-800 overflow-hidden">
+            <div className="flex flex-col bg-white border border-zinc-200 rounded-2xl dark:bg-zinc-950 dark:border-zinc-800 overflow-hidden shadow-sm">
               <div className="flex items-center justify-between px-6 py-4 border-b border-zinc-200 dark:border-zinc-800 bg-zinc-50/50 dark:bg-zinc-900/50">
                 <h3 className="font-semibold text-zinc-900 dark:text-white">Tamil Transcription</h3>
                 <div className="flex items-center gap-1.5">
@@ -478,7 +387,7 @@ export default function NewTranslation() {
             </div>
 
             {/* English Translation */}
-            <div className="flex flex-col bg-white border border-zinc-200 rounded-2xl dark:bg-zinc-950 dark:border-zinc-800 overflow-hidden">
+            <div className="flex flex-col bg-white border border-zinc-200 rounded-2xl dark:bg-zinc-950 dark:border-zinc-800 overflow-hidden shadow-sm">
               <div className="flex items-center justify-between px-6 py-4 border-b border-zinc-200 dark:border-zinc-800 bg-zinc-50/50 dark:bg-zinc-900/50">
                 <h3 className="font-semibold text-zinc-900 dark:text-white">English Translation</h3>
                 <button

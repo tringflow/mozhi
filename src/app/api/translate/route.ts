@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { groq } from "../../../lib/groq";
+import { translateTamilLongText } from "../../../lib/sarvam";
 
 export async function POST(req: NextRequest) {
   try {
@@ -12,30 +12,14 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    const response = await groq.chat.completions.create({
-      model: "openai/gpt-oss-20b",
-      messages: [
-        {
-          role: "system",
-          content: "You are an expert Tamil-to-English translator. Translate the following Tamil Unicode text into natural, clean English. Preserve names, numbers, dates, times, and context. Output ONLY the English translation. Do not include any explanations, extra notes, introduction, or quotes.",
-        },
-        {
-          role: "user",
-          content: tamilText,
-        },
-      ],
-      temperature: 0.3,
-    });
-
-    console.log("Groq translation response choices:", JSON.stringify(response.choices));
-    const englishText = response.choices[0]?.message?.content?.trim() || "";
-    console.log("Extracted englishText:", englishText);
+    const englishText = await translateTamilLongText(tamilText);
 
     return NextResponse.json({ englishText });
   } catch (error) {
     console.error("Translation API error:", error);
+    const errorMessage = error instanceof Error ? error.message : String(error);
     return NextResponse.json(
-      { error: "Failed to translate text" },
+      { error: `Failed to translate text: ${errorMessage}` },
       { status: 500 }
     );
   }
