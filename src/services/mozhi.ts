@@ -9,8 +9,24 @@ export interface Translation {
   created_at: string;
 }
 
+export interface TranscribeResult {
+  success: boolean;
+  isAsync: boolean;
+  jobId?: string;
+  filename?: string;
+  tamilText?: string;
+  transcription?: string;
+}
+
+export interface BatchStatusResult {
+  status: "processing" | "completed" | "failed";
+  transcription?: string;
+  translation?: string;
+  error?: string;
+}
+
 export const mozhiService = {
-  async transcribeAudio(file: File): Promise<string> {
+  async transcribeAudio(file: File): Promise<TranscribeResult> {
     const formData = new FormData();
     formData.append("audio", file);
 
@@ -24,8 +40,20 @@ export const mozhiService = {
       throw new Error(errData.error || "Failed to transcribe Tamil audio");
     }
 
-    const data = await response.json();
-    return data.tamilText;
+    return response.json();
+  },
+
+  async checkBatchStatus(jobId: string, filename: string): Promise<BatchStatusResult> {
+    const response = await fetch(
+      `/api/transcribe/status?jobId=${encodeURIComponent(jobId)}&filename=${encodeURIComponent(filename)}`
+    );
+
+    if (!response.ok) {
+      const errData = await response.json().catch(() => ({}));
+      throw new Error(errData.error || "Failed to retrieve job status");
+    }
+
+    return response.json();
   },
 
   async translateText(tamilText: string): Promise<string> {
