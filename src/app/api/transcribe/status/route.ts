@@ -1,11 +1,33 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getSTTJobStatus, getSTTDownloadUrl, translateTamilLongText } from "../../../../lib/sarvam";
+import { resolveLanguage } from "../../../../lib/languages";
+import { getErrorMessage } from "../../../../lib/errors";
+import { getSTTJobStatus, getSTTDownloadUrl, translateLongText } from "../../../../lib/sarvam";
+
+// Completion triggers chunked translation of the whole transcript within this request.
+export const maxDuration = 60;
+
+interface JobDetail {
+  file_name?: string;
+  state?: string;
+  error_message?: string;
+  outputs?: { file_name: string }[];
+}
+
+type DownloadUrl = string | { file_url?: string } | undefined;
 
 export async function GET(req: NextRequest) {
   try {
     const { searchParams } = new URL(req.url);
     const jobId = searchParams.get("jobId");
     const filename = searchParams.get("filename");
+    const lang = resolveLanguage(searchParams.get("language"));
+
+    if (!lang) {
+      return NextResponse.json(
+        { error: "Unsupported or missing language" },
+        { status: 400 }
+      );
+    }
 
     if (!jobId || !filename) {
       return NextResponse.json(
@@ -15,8 +37,7 @@ export async function GET(req: NextRequest) {
     }
 
     const statusData = await getSTTJobStatus(jobId);
-    console.log("Sarvam statusData:", JSON.stringify(statusData));
-    const jobState = statusData.job_state;
+    const jobState: string = statusData.job_state;
 
     if (jobState === "Failed") {
       return NextResponse.json({
@@ -26,44 +47,52 @@ export async function GET(req: NextRequest) {
     }
 
     if (jobState === "Completed" || jobState === "PartiallyCompleted") {
-      // Find output file name from statusData
-      let outputFileName = "0.json";
-      const fileDetail = statusData.job_details?.find(
-        (detail: any) => detail.file_name === filename
+      const fileDetail = (statusData.job_details as JobDetail[] | undefined)?.find(
+        (detail) => detail.file_name === filename
       );
-      if (fileDetail && fileDetail.outputs && fileDetail.outputs.length > 0) {
-        outputFileName = fileDetail.outputs[0].file_name;
-      }
-      console.log("Determined outputFileName:", outputFileName);
 
-      // Fetch download URL
+      // A PartiallyCompleted job can contain a failed file; don't treat that as success.
+      if (fileDetail?.state === "Failed") {
+        return NextResponse.json({
+          status: "failed",
+          error: fileDetail.error_message || "Sarvam could not process this audio file.",
+        });
+      }
+
+      const outputFileName = fileDetail?.outputs?.[0]?.file_name ?? "0.json";
+
       const downloadData = await getSTTDownloadUrl(jobId, outputFileName);
-      console.log("Sarvam downloadData response:", JSON.stringify(downloadData));
-      const downloadUrlObj = downloadData.download_urls[outputFileName];
+      const downloadUrlObj: DownloadUrl = downloadData.download_urls?.[outputFileName];
       const downloadUrl = downloadUrlObj && typeof downloadUrlObj === "object" ? downloadUrlObj.file_url : downloadUrlObj;
-      console.log("Final downloadUrl string:", downloadUrl);
 
       if (!downloadUrl) {
         return NextResponse.json(
           { error: "No download URL returned from Sarvam" },
-          { status: 500 }
+          { status: 502 }
         );
       }
 
-      // Download the result JSON
-      const finalResultResponse = await fetch(downloadUrl);
+      // The URL is a signed link: never log it.
+      const finalResultResponse = await fetch(downloadUrl, { signal: AbortSignal.timeout(60_000) });
       if (!finalResultResponse.ok) {
         return NextResponse.json(
           { error: "Failed to download transcription results" },
-          { status: 500 }
+          { status: 502 }
         );
       }
 
       const finalResult = await finalResultResponse.json();
-      const transcript = finalResult.transcript || "";
+      const transcript = typeof finalResult.transcript === "string" ? finalResult.transcript.trim() : "";
 
-      // Translate the transcription to English using the long-text helper to handle >2000 chars
-      const englishTranslation = await translateTamilLongText(transcript);
+      if (!transcript) {
+        return NextResponse.json({
+          status: "failed",
+          error: "No speech was detected in the audio.",
+        });
+      }
+
+      // Translate to English; the long-text helper chunks transcripts that exceed the API limit.
+      const englishTranslation = await translateLongText(transcript, lang);
 
       return NextResponse.json({
         status: "completed",
@@ -75,9 +104,8 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ status: "processing" });
   } catch (error) {
     console.error("Status route error:", error);
-    const errorMessage = error instanceof Error ? error.message : String(error);
     return NextResponse.json(
-      { error: `Status check failed: ${errorMessage}` },
+      { error: `Status check failed: ${getErrorMessage(error)}` },
       { status: 500 }
     );
   }
