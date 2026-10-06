@@ -15,8 +15,8 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Mozhi | Tamil Transcription & Translation",
-  description: "Tamil Speech Transcription and English Translation Dashboard",
+  title: "Mozhi | Tamil & Telugu Transcription & Translation",
+  description: "Tamil and Telugu Speech Transcription and English Translation Dashboard",
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
