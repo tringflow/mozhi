@@ -1,13 +1,13 @@
 "use client";
 
 import Link from "next/link";
+import Image from "next/image";
 import { usePathname } from "next/navigation";
 import {
   LayoutDashboard,
   Upload,
   History,
   BarChart3,
-  Languages,
   ChevronRight,
 } from "lucide-react";
 import { cn } from "../../lib/utils";
@@ -28,9 +28,12 @@ export default function Sidebar() {
         {/* Logo/Brand */}
         <div className="flex items-center h-20 px-6 border-b border-zinc-100 dark:border-zinc-900">
           <Link href="/" className="flex items-center gap-2.5">
-            <img
+            <Image
               src="/logo.png"
               alt="Mozhi Logo"
+              width={36}
+              height={36}
+              priority
               className="w-9 h-9 object-contain rounded-lg"
             />
             <span className="text-xl font-bold tracking-tight text-zinc-900 dark:text-white">
