@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState, use } from "react";
+import { languageOrDefault } from "../../../lib/languages";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 import {
@@ -16,6 +17,7 @@ import {
   AlertCircle,
 } from "lucide-react";
 import { mozhiService, Translation } from "../../../services/mozhi";
+import { getErrorMessage } from "../../../lib/errors";
 
 type PageProps = {
   params: Promise<{ id: string }>;
@@ -34,24 +36,25 @@ export default function TranslationDetails({ params }: PageProps) {
   const [copiedEnglish, setCopiedEnglish] = useState(false);
 
   useEffect(() => {
-    if (id) {
-      fetchDetails();
-    }
+    if (!id) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        setLoading(true);
+        setError(null);
+        const data = await mozhiService.getTranslation(id);
+        if (!cancelled) setTranslation(data);
+      } catch (err) {
+        console.error("Fetch details error:", err);
+        if (!cancelled) setError(getErrorMessage(err, "Failed to load translation details."));
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
   }, [id]);
-
-  const fetchDetails = async () => {
-    try {
-      setLoading(true);
-      setError(null);
-      const data = await mozhiService.getTranslation(id);
-      setTranslation(data);
-    } catch (err: any) {
-      console.error("Fetch details error:", err);
-      setError(err.message || "Failed to load translation details.");
-    } finally {
-      setLoading(false);
-    }
-  };
 
   const handleCopy = (text: string, type: "tamil" | "english") => {
     navigator.clipboard.writeText(text);
@@ -72,9 +75,9 @@ export default function TranslationDetails({ params }: PageProps) {
     try {
       await mozhiService.deleteTranslation(id);
       router.push("/history");
-    } catch (err: any) {
+    } catch (err) {
       console.error("Delete translation error:", err);
-      alert(err.message || "Failed to delete translation.");
+      alert(getErrorMessage(err, "Failed to delete translation."));
     }
   };
 
@@ -169,6 +172,7 @@ export default function TranslationDetails({ params }: PageProps) {
         </div>
 
         {/* Audio Player */}
+        {translation.audio_url && (
         <div className="w-full flex items-center justify-between gap-4 p-4 bg-zinc-50 dark:bg-zinc-900/50 rounded-xl border border-zinc-100 dark:border-zinc-850">
           <div className="flex items-center gap-2 text-zinc-700 dark:text-zinc-300">
             <Volume2 className="w-5 h-5" />
@@ -176,18 +180,19 @@ export default function TranslationDetails({ params }: PageProps) {
           </div>
           <audio src={translation.audio_url} controls className="h-8 max-w-md w-full" />
         </div>
+        )}
       </div>
 
       {/* Side-by-Side Content Display */}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-        {/* Tamil Transcript */}
+        {/* Source-language Transcript */}
         <div className="flex flex-col bg-white border border-zinc-200 rounded-2xl dark:bg-zinc-950 dark:border-zinc-800 overflow-hidden shadow-sm">
           <div className="flex items-center justify-between px-6 py-4 border-b border-zinc-200 dark:border-zinc-800 bg-zinc-50/50 dark:bg-zinc-900/50">
-            <h3 className="font-semibold text-zinc-900 dark:text-white">Tamil Transcription</h3>
+            <h3 className="font-semibold text-zinc-900 dark:text-white">{languageOrDefault(translation.language).name} Transcription</h3>
             <button
               onClick={() => handleCopy(translation.tamil_text, "tamil")}
               className="p-2 text-zinc-500 hover:bg-zinc-100 rounded-lg dark:text-zinc-400 dark:hover:bg-zinc-900 transition-colors"
-              title="Copy Tamil"
+              title={`Copy ${languageOrDefault(translation.language).name}`}
             >
               {copiedTamil ? <Check className="w-4 h-4 text-emerald-600" /> : <Copy className="w-4 h-4" />}
             </button>
