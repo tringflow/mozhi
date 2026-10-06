@@ -2,8 +2,9 @@
 
 import { useState } from "react";
 import Link from "next/link";
+import Image from "next/image";
 import { usePathname } from "next/navigation";
-import { Menu, X, Languages, LayoutDashboard, Upload, History, BarChart3 } from "lucide-react";
+import { Menu, X, LayoutDashboard, Upload, History, BarChart3 } from "lucide-react";
 import { cn } from "../../lib/utils";
 
 const navigation = [
@@ -38,9 +39,12 @@ export default function Navbar() {
           <Menu className="w-6 h-6" />
         </button>
         <Link href="/" className="flex items-center gap-2.5">
-          <img
+          <Image
             src="/logo.png"
             alt="Mozhi Logo"
+            width={32}
+            height={32}
+            priority
             className="w-8 h-8 object-contain rounded-lg"
           />
           <span className="text-lg font-bold tracking-tight text-zinc-900 dark:text-white">
@@ -56,7 +60,7 @@ export default function Navbar() {
         </h1>
         <p className="text-xs text-zinc-400 dark:text-zinc-500 font-medium">
           {pathname === "/new" || pathname === "/"
-            ? "AI-powered Tamil speech transcription, translation, and insights"
+            ? "AI-powered Tamil & Telugu speech transcription, translation, and insights"
             : "Manage your transcript history and analytics"}
         </p>
       </div>
@@ -81,9 +85,12 @@ export default function Navbar() {
           <div className="relative flex flex-col w-full max-w-xs p-6 bg-white dark:bg-zinc-950 shadow-2xl">
             <div className="flex items-center justify-between mb-8">
               <Link href="/" className="flex items-center gap-2.5" onClick={() => setMobileMenuOpen(false)}>
-                <img
+                <Image
                   src="/logo.png"
                   alt="Mozhi Logo"
+                  width={32}
+                  height={32}
+                  priority
                   className="w-8 h-8 object-contain rounded-lg"
                 />
                 <span className="text-lg font-bold tracking-tight text-zinc-900 dark:text-white">
