@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import {
   Mic,
@@ -8,62 +8,55 @@ import {
   Clock,
   AudioLines,
   Plus,
-  Play,
   Volume2,
   Loader2,
   ChevronRight,
+  AlertCircle,
 } from "lucide-react";
 import { mozhiService, Translation } from "../services/mozhi";
+import { getErrorMessage } from "../lib/errors";
+
+function computeStats(items: Translation[]) {
+  const totalCount = items.length;
+
+  // Items created within the last 7 days
+  const oneWeekAgo = new Date();
+  oneWeekAgo.setDate(oneWeekAgo.getDate() - 7);
+  const weekCount = items.filter((item) => new Date(item.created_at) >= oneWeekAgo).length;
+
+  const totalDuration = items.reduce((acc, curr) => acc + (curr.audio_duration || 0), 0);
+  const avgDuration = totalCount > 0 ? totalDuration / totalCount : 0;
+
+  return { totalCount, weekCount, totalDuration, avgDuration };
+}
 
 export default function Dashboard() {
   const [translations, setTranslations] = useState<Translation[]>([]);
   const [loading, setLoading] = useState(true);
-  const [stats, setStats] = useState({
-    totalCount: 0,
-    weekCount: 0,
-    totalDuration: 0,
-    avgDuration: 0,
-  });
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const stats = useMemo(() => computeStats(translations), [translations]);
 
   // Audio play state
   const [playingId, setPlayingId] = useState<string | null>(null);
   const [audioEl, setAudioEl] = useState<HTMLAudioElement | null>(null);
 
   useEffect(() => {
-    fetchDashboardData();
+    let cancelled = false;
+    (async () => {
+      try {
+        const data = await mozhiService.getHistory();
+        if (!cancelled) setTranslations(data);
+      } catch (err) {
+        console.error("Dashboard data load error:", err);
+        if (!cancelled) setLoadError(getErrorMessage(err, "Failed to load history."));
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
   }, []);
-
-  const fetchDashboardData = async () => {
-    try {
-      setLoading(true);
-      const data = await mozhiService.getHistory();
-      setTranslations(data);
-      computeStats(data);
-    } catch (err) {
-      console.error("Dashboard data load error:", err);
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const computeStats = (items: Translation[]) => {
-    const totalCount = items.length;
-
-    // Filter items created within the last 7 days
-    const oneWeekAgo = new Date();
-    oneWeekAgo.setDate(oneWeekAgo.getDate() - 7);
-    const weekCount = items.filter((item) => new Date(item.created_at) >= oneWeekAgo).length;
-
-    const totalDuration = items.reduce((acc, curr) => acc + (curr.audio_duration || 0), 0);
-    const avgDuration = totalCount > 0 ? totalDuration / totalCount : 0;
-
-    setStats({
-      totalCount,
-      weekCount,
-      totalDuration,
-      avgDuration,
-    });
-  };
 
   const handlePlayAudio = (url: string, id: string) => {
     if (playingId === id && audioEl) {
@@ -78,14 +71,17 @@ export default function Dashboard() {
     }
 
     const newAudio = new Audio(url);
-    newAudio.play();
-    setPlayingId(id);
-    setAudioEl(newAudio);
-
     newAudio.onended = () => {
       setPlayingId(null);
       setAudioEl(null);
     };
+    newAudio.play().catch((err) => {
+      console.warn("Audio playback failed:", err);
+      setPlayingId(null);
+      setAudioEl(null);
+    });
+    setPlayingId(id);
+    setAudioEl(newAudio);
   };
 
   useEffect(() => {
@@ -121,12 +117,18 @@ export default function Dashboard() {
 
   return (
     <div className="max-w-6xl mx-auto space-y-10 font-sans">
+      {loadError && (
+        <div className="flex items-center gap-3 p-4 bg-red-50 border border-red-200 rounded-xl text-red-700 dark:bg-red-950/30 dark:border-red-900/50 dark:text-red-400" role="alert">
+          <AlertCircle className="w-5 h-5 flex-shrink-0" />
+          <p className="text-sm font-semibold">Could not load history: {loadError}</p>
+        </div>
+      )}
       {/* Welcome Banner */}
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-6 p-8 bg-zinc-900 text-white rounded-3xl dark:bg-white dark:text-black">
         <div className="space-y-2">
           <h2 className="text-3xl font-extrabold tracking-tight">Vanakkam! Welcome to Mozhi</h2>
           <p className="text-sm opacity-80 max-w-lg leading-relaxed">
-            Translate and transcribe Tamil audio or live microphone recordings to natural English instantly.
+            Transcribe Tamil or Telugu audio files and translate them to natural English instantly.
           </p>
         </div>
         <Link
@@ -243,8 +245,10 @@ export default function Dashboard() {
 
                   <div className="flex items-center gap-2">
                     <button
-                      onClick={() => handlePlayAudio(item.audio_url, item.id)}
-                      className={`p-2.5 rounded-xl transition-colors ${
+                      onClick={() => item.audio_url && handlePlayAudio(item.audio_url, item.id)}
+                      disabled={!item.audio_url}
+                      title={item.audio_url ? "Play original audio" : "Original audio was not stored"}
+                      className={`p-2.5 rounded-xl transition-colors disabled:opacity-40 disabled:cursor-not-allowed ${
                         playingId === item.id
                           ? "bg-emerald-50 text-emerald-600 dark:bg-emerald-950/40"
                           : "hover:bg-zinc-100 text-zinc-500 dark:hover:bg-zinc-900 dark:text-zinc-400"

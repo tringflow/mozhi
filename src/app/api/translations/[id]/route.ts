@@ -1,12 +1,24 @@
 import { NextRequest, NextResponse } from "next/server";
-import { supabase } from "../../../../lib/supabase";
+import { getSupabase, classifySupabaseError, AUDIO_BUCKET } from "../../../../lib/supabase";
 
 type RouteParams = {
   params: Promise<{ id: string }>;
 };
 
+// PGRST116 = .single() matched no row; anything else is a real database/network failure.
+function respondToError(error: { message: string; code?: string }, method: string) {
+  // 22P02 = malformed uuid in the URL
+  if (error.code === "PGRST116" || error.code === "22P02") {
+    return NextResponse.json({ error: "Translation not found" }, { status: 404 });
+  }
+  const failure = classifySupabaseError(error);
+  console.error(`[translations/:id ${method}] failed:`, failure.code, error);
+  return NextResponse.json({ error: failure.message, code: failure.code }, { status: failure.status });
+}
+
 export async function GET(req: NextRequest, { params }: RouteParams) {
   try {
+    const supabase = getSupabase();
     const { id } = await params;
 
     const { data, error } = await supabase
@@ -16,25 +28,23 @@ export async function GET(req: NextRequest, { params }: RouteParams) {
       .single();
 
     if (error) {
-      console.error("Fetch translation details error:", error);
-      return NextResponse.json(
-        { error: `Translation not found: ${error.message}` },
-        { status: 404 }
-      );
+      return respondToError(error, "GET");
     }
 
     return NextResponse.json(data);
   } catch (error) {
-    console.error("Get translation details error:", error);
+    const failure = classifySupabaseError(error);
+    console.error("[translations/:id GET] failed:", failure.code, error);
     return NextResponse.json(
-      { error: "Failed to retrieve translation details" },
-      { status: 500 }
+      { error: failure.message, code: failure.code },
+      { status: failure.status }
     );
   }
 }
 
 export async function DELETE(req: NextRequest, { params }: RouteParams) {
   try {
+    const supabase = getSupabase();
     const { id } = await params;
 
     // 1. Get the translation to retrieve the audio URL
@@ -45,20 +55,16 @@ export async function DELETE(req: NextRequest, { params }: RouteParams) {
       .single();
 
     if (fetchError) {
-      console.error("Fetch before delete error:", fetchError);
-      return NextResponse.json(
-        { error: `Translation not found: ${fetchError.message}` },
-        { status: 404 }
-      );
+      return respondToError(fetchError, "DELETE");
     }
 
     // 2. Remove the audio file from Storage if URL is available
     if (translation?.audio_url) {
-      const parts = translation.audio_url.split("/public/audio/");
+      const parts = translation.audio_url.split(`/public/${AUDIO_BUCKET}/`);
       if (parts.length > 1) {
         const filePath = parts[1];
         const { error: storageDeleteError } = await supabase.storage
-          .from("audio")
+          .from(AUDIO_BUCKET)
           .remove([filePath]);
         if (storageDeleteError) {
           console.warn("Storage deletion warning:", storageDeleteError);
@@ -73,19 +79,16 @@ export async function DELETE(req: NextRequest, { params }: RouteParams) {
       .eq("id", id);
 
     if (dbDeleteError) {
-      console.error("Database deletion error:", dbDeleteError);
-      return NextResponse.json(
-        { error: `Failed to delete record: ${dbDeleteError.message}` },
-        { status: 500 }
-      );
+      return respondToError(dbDeleteError, "DELETE");
     }
 
     return NextResponse.json({ message: "Translation deleted successfully" });
   } catch (error) {
-    console.error("Delete translation error:", error);
+    const failure = classifySupabaseError(error);
+    console.error("[translations/:id DELETE] failed:", failure.code, error);
     return NextResponse.json(
-      { error: "Failed to delete translation" },
-      { status: 500 }
+      { error: failure.message, code: failure.code },
+      { status: failure.status }
     );
   }
 }

@@ -1,9 +1,15 @@
+import type { LanguageId } from "../lib/languages";
+
 export interface Translation {
   id: string;
-  audio_url: string;
+  /** Null when the original audio could not be stored. */
+  audio_url: string | null;
   audio_filename: string;
   audio_duration: number;
+  /** Source-language transcript (legacy column name; may be Tamil or Telugu). */
   tamil_text: string;
+  /** Null/undefined on records saved before multilingual support (treated as Tamil). */
+  language?: LanguageId | null;
   english_text: string;
   status: string;
   created_at: string;
@@ -14,7 +20,6 @@ export interface TranscribeResult {
   isAsync: boolean;
   jobId?: string;
   filename?: string;
-  tamilText?: string;
   transcription?: string;
 }
 
@@ -26,9 +31,10 @@ export interface BatchStatusResult {
 }
 
 export const mozhiService = {
-  async transcribeAudio(file: File): Promise<TranscribeResult> {
+  async transcribeAudio(file: File, language: LanguageId): Promise<TranscribeResult> {
     const formData = new FormData();
     formData.append("audio", file);
+    formData.append("language", language);
 
     const response = await fetch("/api/transcribe", {
       method: "POST",
@@ -37,15 +43,15 @@ export const mozhiService = {
 
     if (!response.ok) {
       const errData = await response.json().catch(() => ({}));
-      throw new Error(errData.error || "Failed to transcribe Tamil audio");
+      throw new Error(errData.error || "Failed to transcribe audio");
     }
 
     return response.json();
   },
 
-  async checkBatchStatus(jobId: string, filename: string): Promise<BatchStatusResult> {
+  async checkBatchStatus(jobId: string, filename: string, language: LanguageId): Promise<BatchStatusResult> {
     const response = await fetch(
-      `/api/transcribe/status?jobId=${encodeURIComponent(jobId)}&filename=${encodeURIComponent(filename)}`
+      `/api/transcribe/status?jobId=${encodeURIComponent(jobId)}&filename=${encodeURIComponent(filename)}&language=${language}`
     );
 
     if (!response.ok) {
@@ -56,11 +62,11 @@ export const mozhiService = {
     return response.json();
   },
 
-  async translateText(tamilText: string): Promise<string> {
+  async translateText(text: string, language: LanguageId): Promise<string> {
     const response = await fetch("/api/translate", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ tamilText }),
+      body: JSON.stringify({ text, language }),
     });
 
     if (!response.ok) {
@@ -74,14 +80,16 @@ export const mozhiService = {
 
   async saveTranslation(
     file: File,
-    tamilText: string,
+    language: LanguageId,
+    sourceText: string,
     englishText: string,
     duration: number,
     filename: string
   ): Promise<Translation> {
     const formData = new FormData();
     formData.append("audio", file);
-    formData.append("tamilText", tamilText);
+    formData.append("language", language);
+    formData.append("sourceText", sourceText);
     formData.append("englishText", englishText);
     formData.append("duration", duration.toString());
     formData.append("filename", filename);

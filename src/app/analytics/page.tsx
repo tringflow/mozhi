@@ -1,100 +1,72 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import { BarChart3, Clock, Calendar, AudioLines, Loader2 } from "lucide-react";
+import { useEffect, useMemo, useState } from "react";
+import { BarChart3, Clock, Calendar, AudioLines, Loader2, AlertCircle } from "lucide-react";
 import { mozhiService, Translation } from "../../services/mozhi";
+import { getErrorMessage } from "../../lib/errors";
 
 interface DailyActivity {
   date: string;
   count: number;
 }
 
+function computeStats(items: Translation[]) {
+  const totalCount = items.length;
+  const totalDuration = items.reduce((acc, curr) => acc + (curr.audio_duration || 0), 0);
+  const avgDuration = totalCount > 0 ? totalDuration / totalCount : 0;
+
+  const now = new Date();
+  const oneWeekAgo = new Date();
+  oneWeekAgo.setDate(now.getDate() - 7);
+  const oneMonthAgo = new Date();
+  oneMonthAgo.setMonth(now.getMonth() - 1);
+
+  const weekCount = items.filter((item) => new Date(item.created_at) >= oneWeekAgo).length;
+  const monthCount = items.filter((item) => new Date(item.created_at) >= oneMonthAgo).length;
+
+  return { totalCount, totalDuration, avgDuration, weekCount, monthCount };
+}
+
+// Daily activity for the last 7 days
+function generateChartData(items: Translation[]): DailyActivity[] {
+  const fmt = (d: Date) => d.toLocaleDateString("en-US", { month: "short", day: "numeric" });
+  const days: DailyActivity[] = [];
+  for (let i = 6; i >= 0; i--) {
+    const d = new Date();
+    d.setDate(d.getDate() - i);
+    days.push({ date: fmt(d), count: 0 });
+  }
+  items.forEach((item) => {
+    const day = days.find((d) => d.date === fmt(new Date(item.created_at)));
+    if (day) day.count += 1;
+  });
+  return days;
+}
+
 export default function AnalyticsPage() {
   const [translations, setTranslations] = useState<Translation[]>([]);
   const [loading, setLoading] = useState(true);
-  const [stats, setStats] = useState({
-    totalCount: 0,
-    totalDuration: 0,
-    avgDuration: 0,
-    weekCount: 0,
-    monthCount: 0,
-  });
-  const [chartData, setChartData] = useState<DailyActivity[]>([]);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const stats = useMemo(() => computeStats(translations), [translations]);
+  const chartData = useMemo(() => generateChartData(translations), [translations]);
 
   useEffect(() => {
-    fetchAnalyticsData();
-  }, []);
-
-  const fetchAnalyticsData = async () => {
-    try {
-      setLoading(true);
-      const data = await mozhiService.getHistory();
-      setTranslations(data);
-      computeStats(data);
-      generateChartData(data);
-    } catch (err) {
-      console.error("Analytics load error:", err);
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const computeStats = (items: Translation[]) => {
-    const totalCount = items.length;
-    const totalDuration = items.reduce((acc, curr) => acc + (curr.audio_duration || 0), 0);
-    const avgDuration = totalCount > 0 ? totalDuration / totalCount : 0;
-
-    const now = new Date();
-    const oneWeekAgo = new Date();
-    oneWeekAgo.setDate(now.getDate() - 7);
-    const oneMonthAgo = new Date();
-    oneMonthAgo.setMonth(now.getMonth() - 1);
-
-    const weekCount = items.filter((item) => new Date(item.created_at) >= oneWeekAgo).length;
-    const monthCount = items.filter((item) => new Date(item.created_at) >= oneMonthAgo).length;
-
-    setStats({
-      totalCount,
-      totalDuration,
-      avgDuration,
-      weekCount,
-      monthCount,
-    });
-  };
-
-  const generateChartData = (items: Translation[]) => {
-    // Generate daily activity for the last 7 days
-    const last7Days: DailyActivity[] = [];
-    const dateMap: { [key: string]: number } = {};
-
-    // Initialize map
-    for (let i = 6; i >= 0; i--) {
-      const d = new Date();
-      d.setDate(d.getDate() - i);
-      const formattedDate = d.toLocaleDateString("en-US", { month: "short", day: "numeric" });
-      dateMap[formattedDate] = 0;
-      last7Days.push({ date: formattedDate, count: 0 });
-    }
-
-    // Populate data
-    items.forEach((item) => {
-      const itemDate = new Date(item.created_at).toLocaleDateString("en-US", {
-        month: "short",
-        day: "numeric",
-      });
-      if (itemDate in dateMap) {
-        dateMap[itemDate] += 1;
+    let cancelled = false;
+    (async () => {
+      try {
+        const data = await mozhiService.getHistory();
+        if (!cancelled) setTranslations(data);
+      } catch (err) {
+        console.error("Analytics load error:", err);
+        if (!cancelled) setLoadError(getErrorMessage(err, "Failed to load history."));
+      } finally {
+        if (!cancelled) setLoading(false);
       }
-    });
-
-    // Map back to array
-    const populatedChartData = last7Days.map((day) => ({
-      date: day.date,
-      count: dateMap[day.date] || 0,
-    }));
-
-    setChartData(populatedChartData);
-  };
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const formatDuration = (secs: number) => {
     const m = Math.floor(secs / 60);
@@ -116,6 +88,12 @@ export default function AnalyticsPage() {
 
   return (
     <div className="max-w-6xl mx-auto space-y-8 font-sans">
+      {loadError && (
+        <div className="flex items-center gap-3 p-4 bg-red-50 border border-red-200 rounded-xl text-red-700 dark:bg-red-950/30 dark:border-red-900/50 dark:text-red-400" role="alert">
+          <AlertCircle className="w-5 h-5 flex-shrink-0" />
+          <p className="text-sm font-semibold">Could not load history: {loadError}</p>
+        </div>
+      )}
       <div>
         <h2 className="text-2xl font-bold tracking-tight text-zinc-900 dark:text-white">
           System Analytics
@@ -149,7 +127,7 @@ export default function AnalyticsPage() {
             <h3 className="text-3xl font-extrabold mt-1 text-zinc-900 dark:text-white">
               {formatDuration(stats.totalDuration)}
             </h3>
-            <p className="text-xs text-zinc-400 mt-1">Processed Tamil audio length</p>
+            <p className="text-xs text-zinc-400 mt-1">Processed audio length</p>
           </div>
         </div>
 

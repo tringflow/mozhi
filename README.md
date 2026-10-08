@@ -1,36 +1,59 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Mozhi
 
-## Getting Started
+Tamil and Telugu speech → transcript → English translation, with history and analytics.
 
-First, run the development server:
+- **Speech-to-text and translation:** [Sarvam AI](https://www.sarvam.ai) (`saaras:v3`, `sarvam-translate:v1`). Clips over ~30 s automatically use Sarvam's batch (asynchronous) API; the browser polls for completion.
+- **History, analytics, audio storage:** Supabase (Postgres + Storage).
+- **Stack:** Next.js 16 (App Router), React 19, Tailwind 4.
+
+Languages are configured in one place: [`src/lib/languages.ts`](src/lib/languages.ts). Add an entry there to support another Sarvam language.
+
+## Setup
 
 ```bash
+npm install
+cp .env.example .env.local   # then fill in the values
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+### Environment variables
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+| Variable | Where | Notes |
+| --- | --- | --- |
+| `SARVAM_API_KEY` | server only | Never exposed to the browser. |
+| `NEXT_PUBLIC_SUPABASE_URL` | server (name is public by Next convention) | Project URL. |
+| `NEXT_PUBLIC_SUPABASE_ANON_KEY` | server (name is public by Next convention) | Used if no service key is set. |
+| `SUPABASE_SERVICE_ROLE_KEY` | server only, **optional** | When set, API routes use it and bypass RLS. Never prefix with `NEXT_PUBLIC_`. |
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+All Supabase access happens in the API routes (`src/lib/supabase.ts` is `server-only`); the browser never talks to Supabase directly.
 
-## Learn More
+### Supabase one-time setup
 
-To learn more about Next.js, take a look at the following resources:
+Run these in the Supabase SQL Editor, in order (both are safe to re-run):
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+1. [`supabase/migrations/20261007_translations_schema.sql`](supabase/migrations/20261007_translations_schema.sql) – creates/updates the `translations` table (including the `language` column).
+2. [`supabase/storage-and-rls.sql`](supabase/storage-and-rls.sql) – creates the `audio` storage bucket and Row Level Security. Read the file: it explains **Option A** (anon policies, works with the anon key alone) vs **Option B** (service-role key, anon access fully closed – recommended).
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+The app never creates the bucket itself. If it is missing, history is still saved (without the original audio) and the server logs say what to create.
 
-## Deploy on Vercel
+## Checks
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+```bash
+npx tsc --noEmit
+npm run lint
+npm run build
+```
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+## Deployment
+
+Mozhi has no login and its API routes call a paid API (Sarvam). Put it behind your platform's access control or rate limiting before exposing it publicly.
+
+**Use a Node host (Render, Railway, Fly.io, a VPS, Docker), not a serverless platform with a small request-body limit.** Audio (up to 25 MB) is uploaded through the Next.js API routes twice (once for transcription, once for storage), and serverless platforms such as Vercel cap request bodies at about 4.5 MB, so larger files would fail there. If you must use such a platform, uploads need to be reworked to go directly to Supabase Storage / Sarvam via signed URLs.
+
+```bash
+npm ci
+npm run build
+npm start          # listens on $PORT (default 3000)
+```
+
+Set the environment variables above on the host. Batch polling is done by the browser (each status request is short), so no long-lived server connections are required; routes declare `maxDuration` for platforms that honour it.

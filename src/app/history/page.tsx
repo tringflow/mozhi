@@ -1,10 +1,10 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { languageOrDefault } from "../../lib/languages";
 import Link from "next/link";
 import {
   Search,
-  Calendar,
   Volume2,
   Trash2,
   Copy,
@@ -12,10 +12,9 @@ import {
   Eye,
   Loader2,
   AlertCircle,
-  Play,
-  Pause,
 } from "lucide-react";
 import { mozhiService, Translation } from "../../services/mozhi";
+import { getErrorMessage } from "../../lib/errors";
 
 export default function HistoryPage() {
   const [history, setHistory] = useState<Translation[]>([]);
@@ -31,29 +30,30 @@ export default function HistoryPage() {
   const [playingId, setPlayingId] = useState<string | null>(null);
   const [audioEl, setAudioEl] = useState<HTMLAudioElement | null>(null);
 
+  // Debounced search; `cancelled` drops responses from superseded requests so stale results never overwrite newer ones.
   useEffect(() => {
-    fetchHistory();
-  }, []);
-
-  const fetchHistory = async (searchTerm?: string) => {
-    try {
-      setLoading(true);
-      setError(null);
-      const data = await mozhiService.getHistory(searchTerm);
-      setHistory(data);
-    } catch (err: any) {
-      console.error("Fetch history error:", err);
-      setError(err.message || "Failed to load translation history.");
-    } finally {
-      setLoading(false);
-    }
-  };
+    let cancelled = false;
+    const timer = setTimeout(async () => {
+      try {
+        setLoading(true);
+        setError(null);
+        const data = await mozhiService.getHistory(search.trim() || undefined);
+        if (!cancelled) setHistory(data);
+      } catch (err) {
+        console.error("Fetch history error:", err);
+        if (!cancelled) setError(getErrorMessage(err, "Failed to load translation history."));
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    }, search ? 300 : 0);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [search]);
 
   const handleSearchChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const val = e.target.value;
-    setSearch(val);
-    // Debounce/Fetch on input change
-    fetchHistory(val);
+    setSearch(e.target.value);
   };
 
   const handleCopy = (text: string, id: string, type: "tamil" | "english") => {
@@ -79,9 +79,9 @@ export default function HistoryPage() {
 
       await mozhiService.deleteTranslation(id);
       setHistory((prev) => prev.filter((item) => item.id !== id));
-    } catch (err: any) {
+    } catch (err) {
       console.error("Delete translation error:", err);
-      alert(err.message || "Failed to delete translation.");
+      alert(getErrorMessage(err, "Failed to delete translation."));
     }
   };
 
@@ -98,14 +98,17 @@ export default function HistoryPage() {
     }
 
     const newAudio = new Audio(url);
-    newAudio.play();
-    setPlayingId(id);
-    setAudioEl(newAudio);
-
     newAudio.onended = () => {
       setPlayingId(null);
       setAudioEl(null);
     };
+    newAudio.play().catch((err) => {
+      console.warn("Audio playback failed:", err);
+      setPlayingId(null);
+      setAudioEl(null);
+    });
+    setPlayingId(id);
+    setAudioEl(newAudio);
   };
 
   // Cleanup audio on component unmount
@@ -165,7 +168,7 @@ export default function HistoryPage() {
           <Search className="absolute left-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-zinc-400" />
           <input
             type="text"
-            placeholder="Search Tamil or English text..."
+            placeholder="Search source or English text..."
             value={search}
             onChange={handleSearchChange}
             className="w-full pl-10 pr-4 py-2 text-sm border border-zinc-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-zinc-500 dark:bg-zinc-900 dark:border-zinc-800"
@@ -199,7 +202,7 @@ export default function HistoryPage() {
                   <th className="px-6 py-4 text-xs font-semibold uppercase tracking-wider text-zinc-500">Date / Time</th>
                   <th className="px-6 py-4 text-xs font-semibold uppercase tracking-wider text-zinc-500">File Name</th>
                   <th className="px-6 py-4 text-xs font-semibold uppercase tracking-wider text-zinc-500">Duration</th>
-                  <th className="px-6 py-4 text-xs font-semibold uppercase tracking-wider text-zinc-500">Tamil Transcript</th>
+                  <th className="px-6 py-4 text-xs font-semibold uppercase tracking-wider text-zinc-500">Source Transcript</th>
                   <th className="px-6 py-4 text-xs font-semibold uppercase tracking-wider text-zinc-500">English Translation</th>
                   <th className="px-6 py-4 text-xs font-semibold uppercase tracking-wider text-zinc-500 text-right">Actions</th>
                 </tr>
@@ -224,6 +227,9 @@ export default function HistoryPage() {
                       {formatDuration(item.audio_duration)}
                     </td>
                     <td className="px-6 py-4 max-w-[200px] truncate">
+                      <span className="mr-2 px-1.5 py-0.5 text-[10px] font-bold rounded bg-teal-50 text-teal-700 dark:bg-teal-950/20 dark:text-teal-400">
+                        {languageOrDefault(item.language).name}
+                      </span>
                       <span className="text-sm text-zinc-900 dark:text-zinc-200 font-sans" title={item.tamil_text}>
                         {item.tamil_text}
                       </span>
@@ -236,20 +242,21 @@ export default function HistoryPage() {
                     <td className="px-6 py-4 whitespace-nowrap text-right text-sm font-medium">
                       <div className="flex items-center justify-end gap-2">
                         <button
-                          onClick={() => handlePlayAudio(item.audio_url, item.id)}
-                          className={`p-2 rounded-lg transition-colors ${
+                          onClick={() => item.audio_url && handlePlayAudio(item.audio_url, item.id)}
+                          disabled={!item.audio_url}
+                          className={`p-2 rounded-lg transition-colors disabled:opacity-40 disabled:cursor-not-allowed ${
                             playingId === item.id
                               ? "bg-emerald-50 text-emerald-600 dark:bg-emerald-950/40"
                               : "hover:bg-zinc-100 text-zinc-500 dark:hover:bg-zinc-900 dark:text-zinc-400"
                           }`}
-                          title="Play original audio"
+                          title={item.audio_url ? "Play original audio" : "Original audio was not stored"}
                         >
                           <Volume2 className={`w-4 h-4 ${playingId === item.id ? "animate-pulse" : ""}`} />
                         </button>
                         <button
                           onClick={() => handleCopy(item.tamil_text, item.id, "tamil")}
                           className="p-2 hover:bg-zinc-100 text-zinc-500 rounded-lg dark:hover:bg-zinc-900 dark:text-zinc-400 transition-colors"
-                          title="Copy Tamil"
+                          title={`Copy ${languageOrDefault(item.language).name}`}
                         >
                           {copiedId === item.id && copiedType === "tamil" ? (
                             <Check className="w-4 h-4 text-emerald-600" />
