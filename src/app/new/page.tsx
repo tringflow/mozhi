@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import {
   Upload,
   Copy,
@@ -13,7 +13,7 @@ import {
   Trash2,
   FileText,
 } from "lucide-react";
-import { mozhiService } from "../../services/mozhi";
+import { mozhiService, type AudioReference } from "../../services/mozhi";
 import { cn } from "../../../lib/utils";
 import { validateAudioFile } from "../../lib/audio";
 import { getErrorMessage } from "../../lib/errors";
@@ -34,6 +34,15 @@ export default function NewTranslation() {
   // Pipeline execution states
   const [pipelineStep, setPipelineStep] = useState<PipelineStep>("idle");
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  // 0..1 while the file is transferring straight to Supabase Storage.
+  const [uploadProgress, setUploadProgress] = useState(0);
+  // Set once the audio is in Storage; reused to transcribe and then to save, so a completed
+  // upload is never repeated.
+  const [audioReference, setAudioReference] = useState<AudioReference | null>(null);
+  // Seconds spent waiting on a Sarvam batch job, so long clips don't look stalled.
+  const [batchElapsed, setBatchElapsed] = useState(0);
+  // Aborts an in-flight upload when the user resets or leaves the page.
+  const cancelUploadRef = useRef<(() => void) | null>(null);
   // Non-blocking: processing succeeded but the result couldn't be persisted
   const [saveWarning, setSaveWarning] = useState<string | null>(null);
   // Non-blocking: saved to history, but the original audio file wasn't stored
@@ -52,6 +61,11 @@ export default function NewTranslation() {
       if (audioUrl) URL.revokeObjectURL(audioUrl);
     };
   }, [audioUrl]);
+
+  // Don't leave a 25 MB transfer running after the component goes away.
+  useEffect(() => {
+    return () => cancelUploadRef.current?.();
+  }, []);
 
   const formatTime = (seconds: number) => {
     const mins = Math.floor(seconds / 60);
@@ -74,6 +88,9 @@ export default function NewTranslation() {
     }
 
     setAudioFile(file);
+    // A new file invalidates any previously uploaded object.
+    setAudioReference(null);
+    setUploadProgress(0);
     const url = URL.createObjectURL(file);
     setAudioUrl(url);
 
@@ -93,11 +110,35 @@ export default function NewTranslation() {
     setAudioWarning(null);
     setSourceText("");
     setEnglishText("");
+    setBatchElapsed(0);
 
     try {
-      // Step 1: Transcribing
+      // Step 1: upload the audio straight to Supabase Storage via a signed URL. The bytes skip
+      // the Next.js server entirely, which is what allows 25 MB files on Vercel (whose
+      // functions reject request bodies over 4.5 MB). A completed upload is reused on retry.
+      let reference = audioReference;
+
+      if (!reference) {
+        setPipelineStep("uploading");
+        setUploadProgress(0);
+
+        const ticket = await mozhiService.createUpload(audioFile);
+        const upload = mozhiService.uploadAudio(ticket, audioFile, setUploadProgress);
+        cancelUploadRef.current = upload.cancel;
+
+        try {
+          await upload.promise;
+        } finally {
+          cancelUploadRef.current = null;
+        }
+
+        reference = { path: ticket.path, pathToken: ticket.pathToken };
+        setAudioReference(reference);
+      }
+
+      // Step 2: Transcribing. Only the storage reference is sent, never the audio.
       setPipelineStep("transcribing");
-      const transcribeResult = await mozhiService.transcribeAudio(audioFile, language);
+      const transcribeResult = await mozhiService.transcribeAudio(reference, language, audioDuration);
 
       let finalSourceText = "";
       let finalEnglishText = "";
@@ -113,6 +154,7 @@ export default function NewTranslation() {
         while (!isDone && attempts < maxAttempts) {
           attempts++;
           await new Promise((resolve) => setTimeout(resolve, 3000));
+          setBatchElapsed(attempts * 3);
 
           let statusResult;
           try {
@@ -145,7 +187,7 @@ export default function NewTranslation() {
         // Sync STT succeeded
         finalSourceText = transcribeResult.transcription || "";
 
-        // Step 2: Translating
+        // Step 3: Translating. The batch path above already returns an English translation.
         setPipelineStep("translating");
         finalEnglishText = await mozhiService.translateText(finalSourceText, language);
       }
@@ -153,19 +195,21 @@ export default function NewTranslation() {
       setSourceText(finalSourceText);
       setEnglishText(finalEnglishText);
 
-      // Step 3: Saving to Supabase (Audio Storage + Postgres Table).
-      // The result is already on screen; a failure here must not discard it.
+      // Step 4: Saving to Postgres. The audio is already in Storage, so this only attaches it
+      // by reference. The result is already on screen; a failure here must not discard it.
       setPipelineStep("saving");
       try {
         const saved = await mozhiService.saveTranslation(
-          audioFile,
+          reference,
           language,
           finalSourceText,
           finalEnglishText,
           audioDuration,
           audioFile.name
         );
-        if (!saved.audio_url) {
+        // Check the stored path, not the signed URL: a URL that merely failed to sign still
+        // means the audio is safely in Storage.
+        if (!saved.audio_path) {
           console.warn("Saved to history without original audio (storage unavailable).");
           setAudioWarning("Saved to history, but the original audio couldn't be stored.");
         }
@@ -194,12 +238,17 @@ export default function NewTranslation() {
   };
 
   const resetForm = () => {
+    cancelUploadRef.current?.();
+    cancelUploadRef.current = null;
     setAudioFile(null);
     if (audioUrl) {
       URL.revokeObjectURL(audioUrl);
       setAudioUrl(null);
     }
     setAudioDuration(0);
+    setAudioReference(null);
+    setUploadProgress(0);
+    setBatchElapsed(0);
     setSourceText("");
     setEnglishText("");
     setPipelineStep("idle");
@@ -212,8 +261,10 @@ export default function NewTranslation() {
   const canPickFile = pipelineStep === "idle" || pipelineStep === "error";
   const hasResult = pipelineStep === "completed" || !!sourceText;
 
+  const uploadPercent = Math.round(uploadProgress * 100);
+
   type StepState = "pending" | "active" | "done";
-  const order: PipelineStep[] = ["transcribing", "translating", "saving", "completed"];
+  const order: PipelineStep[] = ["uploading", "transcribing", "translating", "saving", "completed"];
   const stepState = (index: number): StepState => {
     const current = order.indexOf(pipelineStep);
     if (pipelineStep === "completed") return "done";
@@ -224,10 +275,20 @@ export default function NewTranslation() {
 
   const steps = [
     {
+      name: "Upload to Storage",
+      status: {
+        pending: "Pending",
+        active: `Uploading... ${uploadPercent}%`,
+        done: "Audio uploaded",
+      },
+    },
+    {
       name: "Speech Recognition",
       status: {
         pending: "Pending",
-        active: `Transcribing ${lang.name}...`,
+        active: batchElapsed
+          ? `Processing long audio... ${formatTime(batchElapsed)}`
+          : `Transcribing ${lang.name}...`,
         done: `${lang.name} transcribed`,
       },
     },
@@ -315,7 +376,7 @@ export default function NewTranslation() {
                   </p>
                 </div>
                 <span className="hidden sm:flex items-center gap-1 px-2.5 py-1 text-[10px] font-bold rounded-full bg-teal-50 text-teal-700 border border-teal-100 dark:bg-teal-950/20 dark:text-teal-400 dark:border-teal-900/60">
-                  <Check className="w-3 h-3" /> Uploaded
+                  <Check className="w-3 h-3" /> {audioReference ? "Stored" : "Ready"}
                 </span>
               </div>
 
@@ -343,6 +404,28 @@ export default function NewTranslation() {
             <p className="text-xs text-zinc-400">MP3, WAV, M4A, or WEBM up to 25MB.</p>
           )}
         </div>
+
+        {pipelineStep === "uploading" && (
+          <div
+            role="progressbar"
+            aria-label="Uploading audio"
+            aria-valuemin={0}
+            aria-valuemax={100}
+            aria-valuenow={uploadPercent}
+            className="space-y-1.5"
+          >
+            <div className="flex items-center justify-between text-[10px] font-bold uppercase tracking-wider text-zinc-400">
+              <span>Uploading to secure storage</span>
+              <span className="font-mono text-zinc-600 dark:text-zinc-300">{uploadPercent}%</span>
+            </div>
+            <div className="h-1.5 w-full overflow-hidden rounded-full bg-zinc-100 dark:bg-zinc-900">
+              <div
+                className="h-full rounded-full bg-teal-600 transition-[width] duration-200 ease-out"
+                style={{ width: `${uploadPercent}%` }}
+              />
+            </div>
+          </div>
+        )}
 
         {saveWarning && (
           <div className="px-3 py-2 bg-amber-50 text-amber-800 border border-amber-200 rounded-xl dark:bg-amber-950/30 dark:text-amber-400 dark:border-amber-900/50 text-xs" role="status">
