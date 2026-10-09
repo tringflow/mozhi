@@ -130,29 +130,38 @@ export async function POST(req: NextRequest) {
     const rawFilename = typeof body.filename === "string" ? body.filename.trim() : "";
     const filename = (rawFilename || "audio.mp3").slice(0, MAX_FILENAME_CHARS);
 
+    // `audio_url` is deliberately NOT in this object. The bucket is private, so there is no
+    // durable URL to store - playback URLs are signed per read from `audio_path`. Omitting the
+    // key rather than sending an explicit null lets a column default apply, which matters on a
+    // table whose `audio_url` is still NOT NULL because the 20261007 migration never ran there.
+    const row = {
+      audio_path: audioPath,
+      audio_filename: filename,
+      audio_duration: duration,
+      tamil_text: sourceText, // legacy column name: holds the source-language transcript
+      language: lang.id,
+      english_text: englishText,
+      status: "completed",
+    };
+
     const { data: dbData, error: dbError } = await supabase
       .from("translations")
-      .insert({
-        audio_path: audioPath,
-        // Nothing durable is stored: playback URLs are signed per read.
-        audio_url: null,
-        audio_filename: filename,
-        audio_duration: duration,
-        tamil_text: sourceText, // legacy column name: holds the source-language transcript
-        language: lang.id,
-        english_text: englishText,
-        status: "completed",
-      })
+      .insert(row)
       .select()
       .single();
 
     if (dbError) {
       const failure = classifySupabaseError(dbError);
+      // Postgres/PostgREST diagnostics only: these name the offending column or constraint and
+      // contain no keys. The transcript itself is never logged, so the log stays safe to share.
+      // `columns` makes schema drift obvious without needing the table definition to hand.
       console.error("[translations POST] insert failed:", failure.code, {
         message: dbError.message,
         code: dbError.code,
         details: dbError.details,
         hint: dbError.hint,
+        columns: Object.keys(row),
+        hasAudioPath: audioPath !== null,
       });
       // The uploaded object is deliberately left in place: the browser owns the upload now, and
       // deleting it here would destroy audio the user may still save on a retry. See the orphan
