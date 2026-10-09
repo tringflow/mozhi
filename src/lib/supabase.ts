@@ -3,7 +3,11 @@ import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 
 export class SupabaseConfigError extends Error {}
 
-/** Storage bucket for original audio. Must be provisioned in Supabase beforehand; the app never creates it. */
+/**
+ * Storage bucket for original audio. Must be provisioned in Supabase beforehand (see
+ * supabase/storage-and-rls.sql); the app never creates it. The bucket is PRIVATE: the browser
+ * only ever touches it through signed URLs minted server-side.
+ */
 export const AUDIO_BUCKET = "audio";
 
 let client: SupabaseClient | null = null;
@@ -81,7 +85,7 @@ export function classifySupabaseError(err: unknown): ApiFailure {
 }
 
 export type StorageFailure = {
-  code: "bucket_missing" | "permission" | "unreachable" | "unknown";
+  code: "bucket_missing" | "permission" | "too_large" | "bad_type" | "unreachable" | "unknown";
   /** Actionable message for the server log. */
   message: string;
 };
@@ -98,10 +102,22 @@ export function classifyStorageError(err: { message?: string; statusCode?: strin
       message: `Supabase Storage bucket "${AUDIO_BUCKET}" does not exist. Create it in Supabase Storage before uploading files.`,
     };
   }
+  if (/exceeded the maximum allowed size|payload too large/i.test(text) || err.statusCode === "413") {
+    return {
+      code: "too_large",
+      message: `Storage rejected the object as too large. Raise file_size_limit on the "${AUDIO_BUCKET}" bucket to at least 25 MB.`,
+    };
+  }
+  if (/mime type|invalid_mime_type/i.test(text) || err.statusCode === "415") {
+    return {
+      code: "bad_type",
+      message: `Storage rejected the object's content type. Check allowed_mime_types on the "${AUDIO_BUCKET}" bucket.`,
+    };
+  }
   if (/row-level security|unauthorized|not allowed|permission|jwt|invalid api key/i.test(text) || err.statusCode === "403" || err.statusCode === "401") {
     return {
       code: "permission",
-      message: `Storage rejected the upload to "${AUDIO_BUCKET}". Add an INSERT policy on storage.objects for this bucket, or set SUPABASE_SERVICE_ROLE_KEY.`,
+      message: `Storage rejected the request for "${AUDIO_BUCKET}". Set SUPABASE_SERVICE_ROLE_KEY so the server can mint signed upload URLs, or add the matching policies on storage.objects.`,
     };
   }
   return { code: "unknown", message: "Unexpected storage error." };
