@@ -215,7 +215,12 @@ export default function NewTranslation() {
         }
       } catch (saveErr) {
         console.warn("Saving to history failed:", saveErr);
-        setSaveWarning("Translation completed, but it couldn't be saved to history.");
+        // Surface the server's reason. The API returns an actionable message for the failures
+        // that actually happen here - an out-of-date schema, a rejected column, RLS - and
+        // replacing it with a generic string left no way to tell those apart from the UI.
+        setSaveWarning(
+          getErrorMessage(saveErr, "Translation completed, but it couldn't be saved to history.")
+        );
       }
 
       setPipelineStep("completed");
