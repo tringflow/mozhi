@@ -11,6 +11,9 @@
     "moduleResolution": "bundler",
     "ignoreDeprecations": "5.0",
     "resolveJsonModule": true,
+    // `*.test.ts` files are run by `node --test`, which resolves explicit .ts specifiers.
+    // Safe here because `noEmit` is on: nothing is rewritten at build time.
+    "allowImportingTsExtensions": true,
     "isolatedModules": true,
     "jsx": "react-jsx",
     "incremental": true,
