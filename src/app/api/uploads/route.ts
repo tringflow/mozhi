@@ -3,6 +3,8 @@ import { AUDIO_CONTENT_TYPES, MAX_AUDIO_BYTES } from "../../../lib/audio";
 import { mintAudioObject, resolveAudioExtension, UploadConfigError } from "../../../lib/upload-token";
 import { createAudioUploadUrl } from "../../../lib/audio-storage";
 import { classifySupabaseError } from "../../../lib/supabase";
+import { guardWriteRoute } from "../../../lib/api-guard";
+import { UPLOAD_RATE_LIMIT, GLOBAL_UPLOAD_RATE_LIMIT } from "../../../lib/rate-limit";
 
 /**
  * Mints a signed URL that the browser PUTs the audio to directly, so the bytes never pass
@@ -13,13 +15,30 @@ import { classifySupabaseError } from "../../../lib/supabase";
  */
 export const maxDuration = 30;
 
+/** Matches the `filename` cap in the translations route; only used to derive the extension. */
+const MAX_FILENAME_CHARS = 255;
+
 export async function POST(req: NextRequest) {
   try {
+    // Mozhi has no accounts, so this throttles and rejects the obviously illegitimate rather
+    // than authenticating. Real access control belongs at the platform edge - see README.md.
+    const rejection = await guardWriteRoute(req.headers, [UPLOAD_RATE_LIMIT, GLOBAL_UPLOAD_RATE_LIMIT]);
+    if (rejection) {
+      return NextResponse.json({ error: rejection.error }, { status: rejection.status, headers: rejection.headers });
+    }
+
     let body: { filename?: unknown; size?: unknown };
     try {
       body = await req.json();
     } catch {
       return NextResponse.json({ error: "Request body must be valid JSON" }, { status: 400 });
+    }
+
+    if (typeof body.filename !== "string" || body.filename.length > MAX_FILENAME_CHARS) {
+      return NextResponse.json(
+        { error: "A filename of at most 255 characters is required" },
+        { status: 400 }
+      );
     }
 
     const ext = resolveAudioExtension(body.filename);
@@ -34,8 +53,8 @@ export async function POST(req: NextRequest) {
     // The second is the measurement of the stored object (see checkAudioObject), which is what
     // actually gates Sarvam and the database, since this number is only the browser's claim.
     const size = typeof body.size === "number" ? body.size : Number.NaN;
-    if (!Number.isFinite(size) || size <= 0) {
-      return NextResponse.json({ error: "A positive file size is required" }, { status: 400 });
+    if (!Number.isSafeInteger(size) || size <= 0) {
+      return NextResponse.json({ error: "A positive whole-number file size is required" }, { status: 400 });
     }
     if (size > MAX_AUDIO_BYTES) {
       return NextResponse.json(
