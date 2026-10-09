@@ -1,31 +1,98 @@
+name: CI
 
-name: Next.js CI
+# Validation pipeline for the Mozhi Next.js app (frontend + API route handlers).
+# Deployment is intentionally NOT wired up yet - see the commented `deploy` job at
+# the bottom once a hosting target is chosen.
 
 on:
   push:
-    branches:
-      - main
+    branches: [main]
   pull_request:
-    branches:
-      - main
+    branches: [main]
   workflow_dispatch:
 
+# A new push to the same branch supersedes the previous run.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  NEXT_TELEMETRY_DISABLED: "1"
+
 jobs:
-  build:
+  validate:
+    name: Lint, typecheck & build
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - name: Check out repository
+        uses: actions/checkout@v7
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
+      # next@16 requires Node >=20.9. 22 is the active LTS and matches local dev.
+      - name: Set up Node.js 22
+        uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: npm
 
-      - name: Install dependencies
+      - name: Install dependencies (npm ci, from package-lock.json)
         run: npm ci
 
+      # Next.js caches compiler output here; restoring it cuts build time and
+      # silences the "No build cache found" warning. Keyed on source so that a
+      # source change reuses the nearest previous cache instead of starting cold.
+      - name: Restore Next.js build cache
+        uses: actions/cache@v6
+        with:
+          path: .next/cache
+          key: ${{ runner.os }}-next-${{ hashFiles('package-lock.json') }}-${{ hashFiles('src/**/*.[jt]s', 'src/**/*.[jt]sx') }}
+          restore-keys: |
+            ${{ runner.os }}-next-${{ hashFiles('package-lock.json') }}-
+
+      # next-env.d.ts and the route-aware type helpers (PageProps, RouteContext)
+      # are generated, not committed, so they must exist before `tsc` runs.
+      - name: Generate Next.js route types
+        run: npx next typegen
+
+      - name: Type-check (tsc --noEmit)
+        run: npx tsc --noEmit
+
+      # `next build` does NOT run ESLint, so lint is its own step.
+      - name: Lint (ESLint)
+        run: npm run lint
+
+      # Node's built-in test runner over the .ts sources; no test framework to install.
+      # Covers upload-path signing, the size/format rules and response-shape parsing.
+      - name: Unit tests (node --test)
+        run: npm test
+
+      # Compiles pages and all /api route handlers. Needs no secrets: every env read in
+      # src/lib/supabase.ts, src/lib/sarvam.ts and src/lib/upload-token.ts happens lazily
+      # inside a function at request time, never at module scope.
       - name: Build Next.js application
         run: npm run build
+
+# ---------------------------------------------------------------------------
+# Deployment (not enabled - no hosting target confirmed yet).
+#
+# Uncomment and fill in once you pick a host. The guards below are the important
+# part: `needs: validate` means it only runs after lint/typecheck/build pass, and
+# the `if` restricts it to pushes to main, so pull requests never deploy.
+#
+# Mozhi has server-side API routes and reads SARVAM_API_KEY, so the host must run
+# Node - a static export to GitHub Pages will not work.
+#
+#  deploy:
+#    name: Deploy to production
+#    needs: validate
+#    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+#    runs-on: ubuntu-latest
+#    environment: production
+#    steps:
+#      - name: Check out repository
+#        uses: actions/checkout@v7
+#      # ... host-specific deploy step goes here ...
+# ---------------------------------------------------------------------------
