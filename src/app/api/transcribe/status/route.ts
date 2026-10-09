@@ -1,10 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
 import { resolveLanguage } from "../../../../lib/languages";
 import { getErrorMessage } from "../../../../lib/errors";
-import { getSTTJobStatus, getSTTDownloadUrl, translateLongText } from "../../../../lib/sarvam";
+import { getSTTJobStatus, getSTTDownloadUrl, translateLongText, resolveSignedEntry } from "../../../../lib/sarvam";
+import { isAudioObjectName } from "../../../../lib/upload-token";
 
 // Completion triggers chunked translation of the whole transcript within this request.
-export const maxDuration = 60;
+export const maxDuration = 300;
 
 interface JobDetail {
   file_name?: string;
@@ -13,7 +14,8 @@ interface JobDetail {
   outputs?: { file_name: string }[];
 }
 
-type DownloadUrl = string | { file_url?: string } | undefined;
+/** `jobId` is interpolated into a Sarvam URL path, so keep it to an opaque identifier. */
+const JOB_ID_PATTERN = /^[A-Za-z0-9_-]{1,100}$/;
 
 export async function GET(req: NextRequest) {
   try {
@@ -29,11 +31,14 @@ export async function GET(req: NextRequest) {
       );
     }
 
-    if (!jobId || !filename) {
-      return NextResponse.json(
-        { error: "jobId and filename are required" },
-        { status: 400 }
-      );
+    if (!jobId || !JOB_ID_PATTERN.test(jobId)) {
+      return NextResponse.json({ error: "A valid jobId is required" }, { status: 400 });
+    }
+
+    // Batch jobs are always submitted under a server-minted object name, so anything else is
+    // not a filename this app created.
+    if (!isAudioObjectName(filename)) {
+      return NextResponse.json({ error: "A valid filename is required" }, { status: 400 });
     }
 
     const statusData = await getSTTJobStatus(jobId);
@@ -62,8 +67,7 @@ export async function GET(req: NextRequest) {
       const outputFileName = fileDetail?.outputs?.[0]?.file_name ?? "0.json";
 
       const downloadData = await getSTTDownloadUrl(jobId, outputFileName);
-      const downloadUrlObj: DownloadUrl = downloadData.download_urls?.[outputFileName];
-      const downloadUrl = downloadUrlObj && typeof downloadUrlObj === "object" ? downloadUrlObj.file_url : downloadUrlObj;
+      const downloadUrl = resolveSignedEntry(downloadData.download_urls?.[outputFileName]);
 
       if (!downloadUrl) {
         return NextResponse.json(
