@@ -30,10 +30,14 @@ async function sarvamFetch(url: string, init: RequestInit, retries = 0): Promise
   }
 }
 
-export async function transcribeAudio(audio: File, lang: LanguageConfig) {
+/**
+ * Synchronous speech-to-text. Sarvam caps this endpoint at 30 seconds of audio and one file per
+ * request; longer clips must go through the batch helpers below.
+ */
+export async function transcribeAudio(audio: Blob, filename: string, lang: LanguageConfig) {
   const formData = new FormData();
 
-  formData.append("file", audio);
+  formData.append("file", audio, filename);
   formData.append("model", lang.transcription.model);
   formData.append("language_code", lang.code);
   formData.append("mode", lang.transcription.mode);
@@ -132,7 +136,25 @@ export async function translateLongText(text: string, lang: LanguageConfig): Pro
   return translatedChunks.join(" ");
 }
 
-// Sarvam Batch/Asynchronous Speech-to-Text API Helpers
+/** True when a sync STT failure is Sarvam refusing the clip for being longer than 30 seconds. */
+export function isDurationLimitError(message: string): boolean {
+  return message.includes("limit of 30 seconds") || message.toLowerCase().includes("duration");
+}
+
+// ---------------------------------------------------------------------------------------------
+// Sarvam Batch / Asynchronous Speech-to-Text API Helpers
+//
+// The batch API accepts audio ONLY as bytes PUT to a pre-signed URL that Sarvam issues
+// (`/job/v1/upload-files`). It has no parameter for an externally hosted audio URL, so a
+// Supabase Storage link - public or signed - cannot be handed to it. Mozhi therefore relays:
+// Supabase Storage -> this server -> Sarvam's pre-signed URL. Both legs are server-to-server,
+// so neither is subject to a serverless request-body limit.
+//
+// Documented limits: 2 hours of audio per file, up to 20 files per job.
+// ---------------------------------------------------------------------------------------------
+
+/** Generous: this leg moves the whole file (up to 25 MB) to Sarvam's object store. */
+const SARVAM_UPLOAD_TIMEOUT_MS = 180_000;
 
 export async function initiateSTTJob(lang: LanguageConfig) {
   const response = await sarvamFetch("https://api.sarvam.ai/speech-to-text/job/v1", {
@@ -177,6 +199,36 @@ export async function getSTTUploadUrl(jobId: string, filename: string) {
   }
 
   return response.json(); // returns { upload_urls: { "filename": "presigned-put-url" } }
+}
+
+/** The API has returned both a bare string and a `{ file_url }` object for these entries. */
+type SignedEntry = string | { file_url?: string } | undefined | null;
+
+export function resolveSignedEntry(entry: SignedEntry): string | null {
+  if (typeof entry === "string") return entry || null;
+  if (entry && typeof entry === "object") return entry.file_url || null;
+  return null;
+}
+
+/**
+ * Streams the audio to Sarvam's pre-signed URL. `x-ms-blob-type` is required because the URL
+ * points at Azure Blob Storage. A Blob body gives fetch a Content-Length, which the store needs.
+ */
+export async function uploadToSTTJob(uploadUrl: string, audio: Blob, contentType: string) {
+  const response = await fetch(uploadUrl, {
+    method: "PUT",
+    headers: {
+      "Content-Type": contentType,
+      "x-ms-blob-type": "BlockBlob",
+    },
+    body: audio,
+    signal: AbortSignal.timeout(SARVAM_UPLOAD_TIMEOUT_MS),
+  });
+
+  if (!response.ok) {
+    // Don't echo the body: it can contain the signed URL.
+    throw new Error(`Failed to upload audio to Sarvam batch storage (HTTP ${response.status}).`);
+  }
 }
 
 export async function startSTTJob(jobId: string) {
