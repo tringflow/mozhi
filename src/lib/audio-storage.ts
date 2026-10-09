@@ -184,6 +184,32 @@ export async function removeAudioObject(path: string): Promise<void> {
   }
 }
 
+/** Objects per delete request. Keeps the cleanup job's round-trips bounded. */
+export const REMOVE_BATCH_SIZE = 100;
+
+/**
+ * Removes many objects in batches rather than one request each, so a cleanup backlog does not
+ * spend its whole time budget on round-trips. Returns how many were removed; a failed batch is
+ * logged and skipped, since the next run will reconsider those objects.
+ */
+export async function removeAudioObjects(paths: string[]): Promise<number> {
+  const storage = getSupabase().storage.from(AUDIO_BUCKET);
+  let removed = 0;
+
+  for (let i = 0; i < paths.length; i += REMOVE_BATCH_SIZE) {
+    const batch = paths.slice(i, i + REMOVE_BATCH_SIZE);
+    const { error } = await storage.remove(batch);
+    if (error) {
+      const failure = classifyStorageError(error as StorageErrorLike);
+      console.warn(`[audio-storage] batch delete failed (${failure.code}); skipping:`, failure.message);
+      continue;
+    }
+    removed += batch.length;
+  }
+
+  return removed;
+}
+
 /**
  * Recovers the object path from a public URL stored by an earlier version of Mozhi, so history
  * rows written while the bucket was public keep working (and keep being deletable) now that it
