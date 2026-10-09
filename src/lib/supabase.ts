@@ -45,7 +45,7 @@ export function getSupabase(): SupabaseClient {
 
 export type ApiFailure = {
   /** Machine-readable category, safe to show the browser. */
-  code: "config" | "unreachable" | "schema" | "permission" | "unknown";
+  code: "config" | "unreachable" | "schema" | "permission" | "constraint" | "unknown";
   status: number;
   /** Safe, user-facing message. Never includes keys or raw internals. */
   message: string;
@@ -80,6 +80,23 @@ export function classifySupabaseError(err: unknown): ApiFailure {
   // 42501 insufficient privilege / RLS violation; PGRST301/PGRST303 = JWT/auth problems
   if (e.code === "42501" || /row-level security|permission denied|invalid api key|jwt/i.test(text)) {
     return { code: "permission", status: 403, message: "The database rejected the request (permissions / row-level security / API key)." };
+  }
+  // 23502 not-null violation. Reached when a column the app writes as null is still NOT NULL -
+  // typically `audio_url` on a table created before it was made nullable. Naming the column
+  // turns this from "unexpected error" into an instruction.
+  if (e.code === "23502") {
+    const column = /column "([^"]+)"/.exec(text)?.[1];
+    return {
+      code: "constraint",
+      status: 500,
+      message: column
+        ? `Database column "${column}" rejects null but the app no longer writes a value for it. Apply the latest migration in supabase/migrations.`
+        : "A database column rejected a null value. Apply the latest migration in supabase/migrations.",
+    };
+  }
+  // 23514 check violation, 23503 foreign key, 23505 unique.
+  if (e.code && ["23503", "23505", "23514"].includes(e.code)) {
+    return { code: "constraint", status: 500, message: "The database rejected the row (constraint violation). Check the schema against supabase/migrations." };
   }
   return { code: "unknown", status: 500, message: "Unexpected database error." };
 }
