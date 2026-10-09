@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getSupabase, classifySupabaseError, AUDIO_BUCKET } from "../../../../lib/supabase";
+import { getSupabase, classifySupabaseError } from "../../../../lib/supabase";
+import { createAudioReadUrl, legacyAudioPath, removeAudioObject } from "../../../../lib/audio-storage";
 
 type RouteParams = {
   params: Promise<{ id: string }>;
@@ -31,7 +32,13 @@ export async function GET(req: NextRequest, { params }: RouteParams) {
       return respondToError(error, "GET");
     }
 
-    return NextResponse.json(data);
+    // The bucket is private: mint a short-lived playback URL instead of returning a durable one.
+    // `legacyAudioPath` keeps rows written while the bucket was public playable.
+    const path = data?.audio_path || legacyAudioPath(data?.audio_url);
+    return NextResponse.json({
+      ...data,
+      audio_url: path ? await createAudioReadUrl(path) : null,
+    });
   } catch (error) {
     const failure = classifySupabaseError(error);
     console.error("[translations/:id GET] failed:", failure.code, error);
@@ -47,10 +54,10 @@ export async function DELETE(req: NextRequest, { params }: RouteParams) {
     const supabase = getSupabase();
     const { id } = await params;
 
-    // 1. Get the translation to retrieve the audio URL
+    // 1. Get the translation to find its stored audio object
     const { data: translation, error: fetchError } = await supabase
       .from("translations")
-      .select("audio_url")
+      .select("audio_url, audio_path")
       .eq("id", id)
       .single();
 
@@ -58,18 +65,11 @@ export async function DELETE(req: NextRequest, { params }: RouteParams) {
       return respondToError(fetchError, "DELETE");
     }
 
-    // 2. Remove the audio file from Storage if URL is available
-    if (translation?.audio_url) {
-      const parts = translation.audio_url.split(`/public/${AUDIO_BUCKET}/`);
-      if (parts.length > 1) {
-        const filePath = parts[1];
-        const { error: storageDeleteError } = await supabase.storage
-          .from(AUDIO_BUCKET)
-          .remove([filePath]);
-        if (storageDeleteError) {
-          console.warn("Storage deletion warning:", storageDeleteError);
-        }
-      }
+    // 2. Remove the audio object. Rows written by older versions carry only a public URL,
+    //    so fall back to recovering the path from it.
+    const path = translation?.audio_path || legacyAudioPath(translation?.audio_url);
+    if (path) {
+      await removeAudioObject(path);
     }
 
     // 3. Delete the translation record from the DB
