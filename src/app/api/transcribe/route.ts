@@ -5,6 +5,8 @@ import { getErrorMessage } from "../../../lib/errors";
 import { audioObjectName, UploadConfigError } from "../../../lib/upload-token";
 import { resolveAudioReference, downloadAudioObject, AudioStorageError } from "../../../lib/audio-storage";
 import { SupabaseConfigError } from "../../../lib/supabase";
+import { guardWriteRoute } from "../../../lib/api-guard";
+import { TRANSCRIBE_RATE_LIMIT } from "../../../lib/rate-limit";
 import {
   transcribeAudio,
   initiateSTTJob,
@@ -32,6 +34,13 @@ export const maxDuration = 300;
 
 export async function POST(request: NextRequest) {
   try {
+    // This route spends Sarvam credit, so it is throttled on the same terms as /api/uploads.
+    // Status polling is deliberately not rate limited: it runs every 3 s during a batch job.
+    const rejection = await guardWriteRoute(request.headers, [TRANSCRIBE_RATE_LIMIT]);
+    if (rejection) {
+      return NextResponse.json({ error: rejection.error }, { status: rejection.status, headers: rejection.headers });
+    }
+
     let body: { path?: unknown; pathToken?: unknown; language?: unknown; durationSeconds?: unknown };
     try {
       body = await request.json();
